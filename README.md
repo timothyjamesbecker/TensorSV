@@ -15,6 +15,7 @@ using tensors and variable topology neural networks",
 <b>python 3.6+</b><br>
 cython 0.29+<br>
 numpy 1.18+<br>
+matplotlib 3.2.1<br>
 h5py 2.10<br>
 pysam 0.15.2<br>
 hfm 0.1.8<br>
