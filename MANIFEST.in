@@ -1,0 +1,5 @@
+include *.txt
+recursive-include docs *.txt
+recursive-include tensorsv/data *
+recursive-include tensorsv/models *
+recursive-include bin/viz *
