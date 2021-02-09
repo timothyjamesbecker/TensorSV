@@ -19,7 +19,7 @@ hfm 0.1.8<br>
 tensorflow-gpu 1.15.0 (currently this implies GPU only)<br>
 ## PIP Installation:
 ```bash
-python3 -m pip install https://github.com/timothyjamesbecker/tensorsv/releases/download/0.0.1/tensorsv-0.0.1.tar.gz
+python3 -m pip install https://github.com/timothyjamesbecker/TensorSV/releases/download/0.0.1/tensorsv-0.0.1.tar.gz
 ```
 ## Basic Usage:
 <b>(1)</b> Start by extracting the features from the BAM file using the hfm package. The script being used here: <b>extractor.py</b> is a high_level multi-bam aware extraction runner that ships with the hfm package.  You can install this package from the git repo: https://github.com/timothyjamesbecker/hfm
