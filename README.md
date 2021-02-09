@@ -2,7 +2,6 @@
 ![GitHub All Releases](https://img.shields.io/github/downloads/timothyjamesbecker/TensorSV/total.svg) 
 [![DOI](https://zenodo.org/badge/229298229.svg)](https://zenodo.org/badge/latestdoi/229298229)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)<br>
-
 ![Alt text](images/tensorsv_logo.png?raw=true "not_tensor") <br>
 ## Moment Based SV Calling and Genotyping
 Copyright (C) 2020-2021 Timothy James Becker
@@ -36,7 +35,7 @@ extractor.py \
 --branch 2 \
 --cpus 12
 ```
-<b>(2)</b> Next you need to normalize and standardize the HFM hdf5 files and capture targets if training is desired using the TensorSV script <b>data_prep.py</b> shown below.  This script can run in parallel for each sample so setting your cpus to the number of samples when you have enough processors and memory is sugested. The result of this step will produce one *.norm.hdf file and one *.label.hdf per sample. For traning you can run the data_prep.merge_samples function to mix together any samples that have under gone this process.
+<b>(2)</b> Next you need to normalize and standardize the HFM hdf5 files and capture targets if training is desired using the TensorSV script <b>data_prep.py</b> shown below.  This script can run in parallel for each sample so setting your cpus to the number of samples when you have enough processors and memory is suggested. The result of this step will produce one *.norm.hdf file and one *.label.hdf per sample. For training you can run the data_prep.merge_samples function to mix together any samples that have under gone this process.
 ```bash
 data_prep.py \
 --vcf_in_path ./hgsv_hg38_hfm_server/hgsv.illumina.hg38.all.geno.vcf.gz \
@@ -62,7 +61,7 @@ train_sv.py \
 --gpu_num 0 \
 --verbose
 ```
-<b>(4)</b> Now you can run the <b>predict_sv.py</b> on the normalized hdf5 from step <b>(2)</b> If you have used training diagnostics and your folder contains true and comparable calls, this will rpoduce metrics on your calls to show your model accuracy.
+<b>(4)</b> Now you can run the <b>predict_sv.py</b> on the normalized hdf5 from step <b>(2)</b> If you have used training diagnostics and your folder contains true and comparable calls, this will produce metrics on your calls to show your model accuracy.
 ```bash
 predict_sv.py \
 --base_dir ./hgsv_hg38_hfm_server/ \
