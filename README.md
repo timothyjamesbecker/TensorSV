@@ -18,7 +18,7 @@ matplotlib 3.2.1<br>
 h5py 2.10<br>
 pysam 0.15.2<br>
 hfm 0.1.8<br>
-tensorflow-gpu 1.15.0 (currently this is GPU training/prediction only)<br>
+tensorflow 1.15.0 (works with tensorflow-gpu 1.15.0 for GPU as well)<br>
 ## PIP Installation:
 ```bash
 python3 -m pip install https://github.com/timothyjamesbecker/TensorSV/releases/download/0.0.1/tensorsv-0.0.1.tar.gz
