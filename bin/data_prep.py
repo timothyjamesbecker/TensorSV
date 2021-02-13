@@ -12,14 +12,50 @@ except Exception as E:
     import pickle
     pass
 from h5py import File
-import numpy as npg
+import numpy as np
 import multiprocessing as mp
 import core
 from hfm import hfm
 
+def g1kp3_vcf_no_samples(vcf_path,out_path=None,c_ints=[150,150,50,50],
+                      skip='#',delim='\t',info_i=7,gz=True):
+    base = vcf_path.split('/')[-1].split('.vcf')[0]
+    s,g,h = '',[],[]
+    if vcf_path.endswith('.gz'):
+        with gzip.GzipFile(vcf_path,'rb') as f:
+            s = ''.join([l.decode() for l in f.readlines()])
+    elif vcf_path.endswith('.vcf'):
+        with open(vcf_path,'r') as f:
+            s = ''.join(f.readlines())
+    else:
+        print('incorrect vcf file suffix...')
+    while s[-1]=='\n': s = s[:-1] #clean up any loose '\n'
+    for t in s.split('\n'):
+        if not t.startswith(skip): g += [t.split(delim)]
+        else:                      h += [t]
+    c_pos,c_end,c_pos95,c_end95 = c_ints
+    G = []
+    for i in range(len(g)):
+        if not g[i][0].startswith('chr'): g[i][0] = 'chr'+g[i][0]
+        sv_type = g[i][info_i].rsplit('SVTYPE=')[-1].rsplit(';')[0]
+        end = g[i][info_i].rsplit(';END=')[-1].rsplit(';')[0]
+        g[i][info_i] = 'SVTYPE=%s;END=%s;CIPOS=-%s,%s;CIEND=-%s,%s;CIPOS95=-%s,%s;CIEND95=-%s,%s'%\
+                       (sv_type,end,c_pos,c_pos,c_end,c_end,c_pos95,c_pos95,c_end95,c_end95)
+        if sv_type in ['DEL','DUP','INV']: G += [g[i]]
+
+    h[-1] = '\t'.join(h[-1].split('\t')[:info_i+1]) #trim off the format and sample name
+    s = '\n'.join(h)+'\n'
+    s += '\n'.join(['\t'.join(row[0:info_i+1]) for row in G])+'\n' #cuts off the format and geno columns
+    if gz:
+        with gzip.GzipFile(out_path+'/%s.vcf.gz'%base,'wb') as f:
+            f.write(s.encode('UTF-8'))
+    else:
+        with open(out_path+'/%s.vcf'%base,'w') as f:
+            f.write(s)
+
 #works on the grch38.all.geno.vcf.gz vcf file
 def g1kp3_vcf_to_dict(vcf_path,out_path=None,samples='all',
-                     skip='#',delim='\t',alt_i=4,info_i=7,s_i=9,geno_split='|'):
+                      skip='#',delim='\t',alt_i=4,info_i=7,s_i=9,geno_split='|'):
     base = vcf_path.split('/')[-1].split('.vcf')[0]
     if os.path.exists(out_path+'/%s.pickle.gz'%base):
         print('dict file was already generated, loading pickle from disk')
@@ -49,10 +85,11 @@ def g1kp3_vcf_to_dict(vcf_path,out_path=None,samples='all',
         for row in g:
             start = int(row[1])
             t     = row[info_i].split('SVTYPE=')[-1].split(';')[0]
-            if row[alt_i].find('INS')>0: t,end = 'INS',start
+            if row[alt_i].find('INS')>0:
+                t,end = 'INS',start
             else:
                 if row[info_i].find('END=')>=0:
-                    end = int(row[info_i].split('END=')[1].split(';')[0])
+                    end = int(row[info_i].split(';END=')[1].split(';')[0])
                 else:
                     end = start+1
             svl   = abs(end-start)
@@ -348,6 +385,102 @@ def fusorsv_vcf_to_dict(vcf_dir,out_path=None,min_size=50,types=['DEL','DUP','IN
             pickle.dump({'sample':S,'type':T,'header':h},f)
     return {'sample':S,'type':T,'header':h}
 
+def svtyper_sample_vcf_to_dict(vcf_path,out_path=None,
+                               skip='#',delim='\t',alt_i=4,info_i=7,s_i=9,geno_split='/'):
+    base = vcf_path.split('/')[-1].split('.vcf')[0]
+    if os.path.exists(out_path+'/%s.pickle.gz'%base):
+        print('dict file was already generated, loading pickle from disk')
+        with gzip.GzipFile(out_path+'/%s.pickle.gz'%base,'rb') as f:
+            D = pickle.load(f)
+            S,T,h = D['sample'],D['type'],D['header']
+    else:
+        print('generating new dict pickle from vcf input...')
+        s,g,h = '',[],[]
+        if vcf_path.endswith('.gz'):
+            with gzip.GzipFile(vcf_path,'rb') as f:
+                s = ''.join([l.decode() for l in f.readlines()])
+        elif vcf_path.endswith('.vcf'):
+            with open(vcf_path,'r') as f:
+                s = ''.join(f.readlines())
+        else:
+            print('incorrect vcf file suffix...')
+        while s[-1]=='\n': s = s[:-1] #clean up any loose '\n'
+        for t in s.split('\n'):
+            if not t.startswith(skip): g += [t.split(delim)]
+            else:                      h += [t]
+        sample_ids = h[-1].split(delim)[s_i:] #2504 sample names/ids
+        sdx_i = {sample_ids[i]:i for i in range(len(sample_ids))}
+        samples = sample_ids
+        S,T = {s:{} for s in samples},{}
+        row_num = 0
+        for row in g:
+            start = int(row[1])
+            t     = row[info_i].split('SVTYPE=')[-1].split(';')[0]
+            if row[alt_i].find('INS')>0:
+                t,end = 'INS',start
+            else:
+                if row[info_i].find('END=')>=0:
+                    end = int(row[info_i].split(';END=')[1].split(';')[0])
+                else:
+                    end = start+1
+            svl   = abs(end-start)
+            af = '1.0'
+            if row[alt_i].find('CN')>0: #each sample only has one of the possible alleles!
+                cns  = [int(x.replace('<','').replace('>','').replace('CN','')) for x in row[alt_i].split(',')]
+                af   = [float(x) for x in af.split(',')]
+            else:
+                cns = [2 for x in row[alt_i].split(',')]
+                af  = float(af)
+            lt = t
+            a_id  = row[2]
+            for s in sdx_i: #unpack some of the VCF file format into a dict
+                gn = row[s_i:][sdx_i[s]]  #get genotype information
+                ls = len(gn.split(geno_split))
+                if gn=='.' or gn.startswith('./.'):
+                    gn = geno_split.join(['0' for x in range(ls)])   #check for missing values='.'
+                gh = [int(x) for x in gn.split(':')[0].split(geno_split)]    #split for genotype parsing
+                gt = sum(gh)                                               #sum > 0 => variation present
+                if gt>0 and s in samples: #only processes the g1kp3 samples you need: #genotype is present: 1|0,0|1,1|1................................
+                    ap = 0
+                    for i in range(len(gh)):
+                        if gh[i]>0: ap = i
+                    ht,cn = 1.0*sum([1 if x==gh[ap] else 0 for x in gh])/ls,ls
+                    if t=='DEL':
+                        cn = sum([1 if x==0 else 0 for x in gh]) # cn = 0 or 1 for ploidy 1-2
+                        naf = af
+                    elif t=='DUP' or t=='CNV': #calculate het and cn for DEL/DUP/CNV dynamic
+                        cn,dels,gns = 0,0,[1]+cns
+                        if type(af) is float: naf = [af]
+                        else:                 naf = [1.0-sum(af)]+af
+                        maf = 0.0
+                        for i in range(len(gh)):
+                            if gns[gh[i]]==0: dels += 1
+                            if gns[gh[i]] != 1:
+                                if gh[i]<len(naf)-1: maf = max(maf,naf[gh[i]])
+                            cn  += gns[gh[i]]
+                        naf = maf
+                        if cn<2:              t = 'DEL'
+                        elif cn==2:           t = 'CNV'
+                        elif cn>2 and dels<1: t = 'DUP'
+                        else:                 t = 'CNV'
+                    else: naf = af
+                    if t in S[s]: S[s][t] += [[row[0],start,end,svl,ht,naf,cn,a_id]]
+                    else:         S[s][t]  = [[row[0],start,end,svl,ht,naf,cn,a_id]]
+                    if t in T:
+                        if a_id in T[t]: T[t][a_id][s] = [row[0],start,end,svl,ht,naf,cn,a_id]
+                        else:            T[t][a_id] = {s:[row[0],start,end,svl,ht,naf,cn,a_id]}
+                    else:                T[t] = {a_id:{s:[row[0],start,end,svl,ht,naf,cn,a_id]}}
+                t = lt
+            row_num += 1
+            if row_num%1000==0: print('%s rows processed'%row_num)
+        for s in S:
+            for t in S[s]:
+                S[s][t] = sorted(S[s][t],key= lambda x: (x[0].zfill(255),x[1]))
+        if out_path is not None:
+            with gzip.GzipFile(out_path+'/%s.pickle.gz'%base,'wb') as f:
+                pickle.dump({'sample':S,'type':T,'header':h},f)
+    return {'sample':S,'type':T,'header':h}
+
 def sv_regions_by_type(D,mask,seqs,flank=100,sniff_chr=True,somatic=False):
     if not somatic:
         R,M,crm = {k:[] for k in seqs},{},'%s'
@@ -536,6 +669,32 @@ def get_dict_type_het(pickle_in,sort_by_len=True):
             for h in N[t]:
                 N[t][h] = sorted(N[t][h],key=lambda x: (x[0].zfill(250),x[1]))
     return N
+
+def dict_to_json_svtyped_regions(pickle_in,json_out,add_chr=True):
+    M,R = {},{}
+    with gzip.GzipFile(pickle_in,'rb') as pickle_f:
+        M = pickle.load(pickle_f)
+        for sm in M['sample']:
+            for t in M['sample'][sm]:
+                if t not in R: R[t] = {}
+                for vc in M['sample'][sm][t]:
+                    seq,start,end = vc[0:3]
+                    if add_chr: seq = 'chr'+seq
+                    reg = (seq,start,end)
+                    if reg in R[t]: R[t][reg] += 1
+                    else:           R[t][reg]  = 1
+        J = {}
+        for t in R:
+            J[t] = []
+            for reg in R[t]: J[t] += [[reg[0],reg[1],reg[2]]]
+            J[t] = sorted(J[t],key=lambda x: (x[0].zfill(255),x[1]))
+        with open(json_out,'w') as json_f:
+            json.dump(J,json_f)
+    return True
+
+def sample_to_vcf(pickle_in,vcf_out):
+
+    return True
 
 #given an hdf5 file, generate a dict of zero coordinates using the smallest windows...
 def get_maxima_regions(hdf5_paths,out_dir,lower_cut=0.1,upper_cut=1000.0,verbose=True):

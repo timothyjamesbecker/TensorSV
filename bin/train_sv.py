@@ -687,7 +687,7 @@ if __name__ == '__main__':
     parser.add_argument('--geno_bins',type=str,help='comma-seperated upper bin boundries for each sv\t[0.5,1.0]')
     parser.add_argument('--no_geno',action='store_true',help='binary models instead of terniary: 1/1 instead of 0/1 on calls\t[False]')
     parser.add_argument('--geno_cut',type=float,help='genotype fraction cutoff of labeled input tensors\t[0.0]')
-    parser.add_argument('--short_test',action='store_true',help='do not use longer whole genome sequence testing\t[True]')
+    parser.add_argument('--short_test',action='store_true',help='do not use longer whole genome sequence testing\t[False]')
     parser.add_argument('--balance',action='store_true',help='balance background number to sum of genotyped sv_type number\t[False]')
     parser.add_argument('--counter_label',action='store_true',help='for every sv type add the other types to the NOT.1.0 background label\t[False]')
     parser.add_argument('--data_split',type=float,help='test to validation ration\t[5.0/6.0]')
