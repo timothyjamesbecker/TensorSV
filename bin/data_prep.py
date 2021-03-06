@@ -18,7 +18,7 @@ import core
 from hfm import hfm
 
 def g1kp3_vcf_no_samples(vcf_path,out_path=None,c_ints=[150,150,50,50],
-                      skip='#',delim='\t',info_i=7,gz=True):
+                         skip='#',delim='\t',info_i=7,gz=True):
     base = vcf_path.split('/')[-1].split('.vcf')[0]
     s,g,h = '',[],[]
     if vcf_path.endswith('.gz'):
@@ -88,7 +88,9 @@ def g1kp3_vcf_to_dict(vcf_path,out_path=None,samples='all',
             if row[alt_i].find('INS')>0:
                 t,end = 'INS',start
             else:
-                if row[info_i].find('END=')>=0:
+                if row[info_i].startswith('END='):
+                    end = int(row[info_i].split('END=')[1].split(';')[0])
+                elif row[info_i].find('END=')>=0:
                     end = int(row[info_i].split(';END=')[1].split(';')[0])
                 else:
                     end = start+1
