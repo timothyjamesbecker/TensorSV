@@ -692,10 +692,6 @@ def dict_to_json_svtyped_regions(pickle_in,json_out,add_chr=True):
             json.dump(J,json_f)
     return True
 
-def sample_to_vcf(pickle_in,vcf_out):
-
-    return True
-
 #given an hdf5 file, generate a dict of zero coordinates using the smallest windows...
 def get_maxima_regions(hdf5_paths,out_dir,lower_cut=0.1,upper_cut=1000.0,verbose=True):
     R,out = {},'fail'
@@ -879,7 +875,7 @@ def preprocess_hfm_five_point(hfm_in,hdf5_out,
 #hdf5_out output file path,w = window size to use, n_w how many windows to flank on the breakpoints
 #if not_prop is proportion of NOT, where 1.0 is same as the genome (IE very high: NOT:55E3 to DEL:1.5E3, etc...
 def five_point_targets(hdf5_in,target_in,hdf5_out,types=['DEL','DUP','CNV','INV','INS','NOT'],
-                        w_shift={'DEL':[-2,-1,0,1,2],'INS':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
+                        w_shift={'DEL':[-2,-1,0,1,2],'INS':[-2,-1,0,1,2],
                                  'DUP':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'DUP:DISPERSED':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
                                  'DUP:TANDEM':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'DUP:INV':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
                                  'INV':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'INV:PERFECT':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
@@ -941,8 +937,18 @@ def five_point_targets(hdf5_in,target_in,hdf5_out,types=['DEL','DUP','CNV','INV'
                                         V = U
                                         j = r
                                     print('sm=%s randomly sampled %s background targets (NOT)'%(sm,j))
+                            #check dimensions for each sequence and remove those from V that don't match S?
                             if len(V)>0:
                                 print('sm=%s adding t=%s:h=%s to the dataset'%(sm,t,h))
+                                seq_m,bad_seq = max([S[seq]['f'] for seq in S]),[]
+                                for seq in S:
+                                    if S[seq]['f']!=seq_m: bad_seq += [seq]
+                                if len(bad_seq)>0:
+                                    print('bad_seq=%s, removing incompatible labels'%bad_seq)
+                                    W = []
+                                    for i in range(len(V)):
+                                        if V[i][0] not in bad_seq: W += [V[i]]
+                                    V = W
                                 if compression=='gzip':
                                     out = g.create_dataset('%s/%s.%s'%(sm,t,h),(j,5*x,S[list(S.keys())[0]]['f'],S[list(S.keys())[0]]['m']),
                                                            dtype=S[list(S.keys())[0]]['dtype'],shuffle=True,compression='gzip',
@@ -1105,7 +1111,7 @@ def get_closest_w(vc,S,max_size=44,target_size=33):
         return []
 
 def zoom_targets(hdf5_in,target_in,hdf5_out,types=['DEL','DUP','CNV','INV','INS','NOT'],
-                        w_shift={'DEL':[-2,-1,0,1,2],'INS':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
+                        w_shift={'DEL':[-2,-1,0,1,2],'INS':[-2,-1,0,1,2],
                                  'DUP':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'DUP:DISPERSED':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
                                  'DUP:TANDEM':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'DUP:INV':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
                                  'INV':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'INV:PERFECT':[-5,-4,-3,-2,-1,0,1,2,3,4,5],
@@ -1232,7 +1238,7 @@ def w_shift(shift=2):
 
 def process_labels(sm,hfm_in,hdf5_out,target_in,hdf5_label,types,p,n_w,stand,rng,comp,zoom,shift_w,verbose):
     out,start = '',time.time()
-    wind_shift = {'DEL':w_shift(shift_w),'INS':w_shift(2*shift_w+1),
+    wind_shift = {'DEL':w_shift(shift_w),'INS':w_shift(shift_w),
                   'DUP':w_shift(2*shift_w+1),'DUP:DISPERSED':w_shift(2*shift_w+1),
                   'DUP:TANDEM':w_shift(2*shift_w+1),'DUP:INV':w_shift(2*shift_w+1),
                   'INV':w_shift(2*shift_w+1),'INV:PERFECT':w_shift(2*shift_w+1),
@@ -1490,7 +1496,6 @@ if __name__ == '__main__':
         with open(vcf_in_dir+'/sms.maxima.json','r') as f: mask = json.load(f)
         with open(vcf_in_dir+'/ref.meta.json','r') as f:   seqs = json.load(f)
         # D = hgsv_illumina_vcf_to_dict(vcf_path=vcf_in_path,out_path=vcf_in_dir)
-        raise IOError
         if args.somacx_vcf:
             print('using extended somacx vcf format conversions')
             D = somacx_vcf_to_dict(vcf_dir=vcf_in_path,out_path=vcf_in_dir,
