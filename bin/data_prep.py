@@ -1427,6 +1427,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.types is not None:       types    = args.types.split(',')
     else:                            types    = ['DEL','DUP','INV','INS','NOT']
+    print('using sv types = %s'%types)
     if args.range is not None:       rng      = [float(r) for r in args.range.split(',')]
     else:                            rng      = None
     if args.n_w is not None:         n_w      = args.n_w
