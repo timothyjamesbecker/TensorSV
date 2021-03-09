@@ -933,7 +933,10 @@ if __name__ == '__main__':
                     min_p = 0.5
                     B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
                     C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
-                    if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
+                    if len(C)<=0:
+                        print('no clustered pairs found for sv=%s on seq=%s'%(sv,seq))
+                        K,KS = [],[]
+                    elif not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
                         while not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]) and base_score>=min_p:
                             base_score-=0.01
                             C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
