@@ -812,7 +812,7 @@ if __name__ == '__main__':
     if os.path.exists(score_path):
         with open(score_path,'r') as sf: score_data = json.load(sf)
     else:
-        score_path = run_dir+'/scores/%s/score.json'%model_base
+        score_path = run_dir+'/scores/%s.score.json'%model_base
         with open(score_path,'r') as sf: score_data = json.load(sf)
 
     #better testing frame work for iteration...
