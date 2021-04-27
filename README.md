@@ -1,7 +1,6 @@
-![Build Status](https://api.travis-ci.org/timothyjamesbecker/tensorsv.svg)(https://travis-ci.com/timothyjamesbecker/tensorsv) 
+[![Build Status](https://api.travis-ci.org/timothyjamesbecker/tensorsv.svg)](https://travis-ci.com/timothyjamesbecker/tensorsv) 
 ![GitHub All Releases](https://img.shields.io/github/downloads/timothyjamesbecker/TensorSV/total.svg) 
-![DOI](https://zenodo.org/badge/229298229.svg)](https://zenodo.org/badge/latestdoi/229298229)
-![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)(https://www.gnu.org/licenses/gpl-3.0)<br>
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)<br>
 ![Alt text](images/tensorsv_logo.png?raw=true "not_tensor") <br>
 ## Moment Based SV Calling and Genotyping
 Copyright (C) 2020-2021 Timothy James Becker
