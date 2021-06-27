@@ -1255,17 +1255,19 @@ def process_labels(sm,hfm_in,hdf5_out,target_in,hdf5_label,types,p,n_w,stand,rng
             if stand: print('starting normalization on sm=%s with standardization'%sm)
             else:     print('starting normalization on sm=%s'%sm)
             preprocess_hfm_five_point(hfm_in,hdf5_out,final_range=rng,standardize=stand,final_dtype='f2',compression=comp,verbose=verbose)
-            print('starting five point target acquisition on sm=%s, hdf5_in=%s, target_in=%s label_out=%s'%(sm,hdf5_out,target_in,hdf5_label))
-            five_point_targets(hdf5_out,target_in,hdf5_label,types=types,n_w=n_w,not_prop=p,w_shift=wind_shift,compression=comp,verbose=verbose)
+            if os.path.exists(target_in):
+                print('starting five point target acquisition on sm=%s, hdf5_in=%s, target_in=%s label_out=%s'%(sm,hdf5_out,target_in,hdf5_label))
+                five_point_targets(hdf5_out,target_in,hdf5_label,types=types,n_w=n_w,not_prop=p,w_shift=wind_shift,compression=comp,verbose=verbose)
         except Exception as E: out = E
     else:
         try:
             if stand: print('starting zoom normalization on sm=%s with standardization'%sm)
             else:     print('starting zoom normalization on sm=%s'%sm)
             preprocess_hfm_zoom(hfm_in,hdf5_out,final_range=rng,standardize=stand,final_dtype='f2',compression=comp,verbose=verbose)
-            print('starting zoom target acquisition on sm=%s, hdf5_in=%s, target_in=%s label_out=%s'%(sm,hdf5_out,target_in,hdf5_label))
-            zoom_targets(hdf5_out,target_in,hdf5_label,types=types,w_shift=wind_shift,
-                         size=n_w*11,lim_size=n_w*9,target_size=n_w*7,not_prop=p,compression=comp,verbose=verbose)
+            if os.path.exists(target_in):
+                print('starting zoom target acquisition on sm=%s, hdf5_in=%s, target_in=%s label_out=%s'%(sm,hdf5_out,target_in,hdf5_label))
+                zoom_targets(hdf5_out,target_in,hdf5_label,types=types,w_shift=wind_shift,
+                             size=n_w*11,lim_size=n_w*9,target_size=n_w*7,not_prop=p,compression=comp,verbose=verbose)
         except Exception as E: out = E
     stop = time.time()
     if out=='': out = 'sm %s processed in %s sec'%(sm,round(stop-start,2))
@@ -1286,7 +1288,7 @@ def merge_samples(hdf5_dir,hdf5_out,labels=['DEL','DUP','INV','INS','NOT'],not_p
                     match,sv_type = False,k #will do extact or partial match of labels: NOT=>NOT.1.0 = match!
                     for l in labels:
                         if sv_type.find(l)>-1: match = True
-                    if match:
+                    if match: #only down sample the not labels since they are so abundant
                         if k.find('NOT')>=0 and not_prop<1.0: #::::::::::::::SAMPLING MERGE:::::::::::::::::::::::::::
                             g_path = '/%s/%s'%(sample,k)
                             g_size = (max(1,int(round(not_prop*in_f[sample][k].shape[0]))),)+in_f[sample][k].shape[1:]
@@ -1296,7 +1298,8 @@ def merge_samples(hdf5_dir,hdf5_out,labels=['DEL','DUP','INV','INS','NOT'],not_p
                             buff[:] = in_f[sample][k][:]
                             data[:] = buff[idx][:]
                             for a in in_f[sample][k].attrs:
-                                data.attrs[a] = in_f[sample][k].attrs[a]
+                                if a=='svlen': data.attrs[a] = in_f[sample][k].attrs[a][idx]
+                                else:          data.attrs[a] = in_f[sample][k].attrs[a]
                         else: #:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
                             g_path = '/%s/%s'%(sample,k)
                             print('copying %s file\n\tg_path=%s'%(hdf5_file,g_path))
@@ -1354,9 +1357,9 @@ def rename_sample_norm(hdf5_in,hdf5_out,sm,w=25):
     return True
 
 #some normalization checking for dimension and values => mean should be at 0.0, std should be 1.0...
-def check_norms(hdf5_dir,mean=0.0,std=1.0):
+def check_norms(hdf5_dir,diff_cut=1e-1):
     hdf5s = glob.glob(hdf5_dir+'*.norm.*')
-    R = {}
+    R,E = {},{}
     for h5 in hdf5s:
         f = File(h5,'r')
         for sm in f:
@@ -1373,6 +1376,11 @@ def check_norms(hdf5_dir,mean=0.0,std=1.0):
                         else:
                             if dims[1:] not in R: R[dims[1:]] = {sm:{rg:seq}}
                             else:                 R[dims[1:]][sm] = {rg:seq}
+                        d_diff = np.abs(np.min(f[sm][rg][seq][:,:,:])-np.max(f[sm][rg][seq][:,:,:]))
+                        if d_diff <= diff_cut:
+                            err = (sm,rg,seq,d_diff)
+                            print('sm=%s,rg=%s,seq=%s lacks diversity of range: diff=%s'%err)
+                            E[(sm,rg,seq)] = d_diff
                     else:
                         for w in f[sm][rg][seq]:
                             dims = f[sm][rg][seq][w].shape
@@ -1384,9 +1392,18 @@ def check_norms(hdf5_dir,mean=0.0,std=1.0):
                             else:
                                 if dims[1:] not in R: R[dims[1:]] = {sm:{rg:{seq:w}}}
                                 else:                 R[dims[1:]][sm] = {rg:{seq:w}}
-    if len(R)>1:
-        print('presence of non-uniform normalization files detected...')
-        print(R)
+                            d_diff = np.abs(np.min(f[sm][rg][seq][w][:,:,:])-np.max(f[sm][rg][seq][w][:,:,:]))
+                            if d_diff <= diff_cut:
+                                err = (sm,rg,seq,w,d_diff)
+                                print('sm=%s,rg=%s,seq=%s,w=%s lacks diversity of range: diff=%s'%err)
+                                E[(sm,rg,seq,w)] = d_diff
+    if len(R)>1 or len(E)>0:
+        if len(R)>1: #any keys beyond the one main/normal key that is supposed to be present
+            print('presence of non-uniform normalization files detected...')
+            print(R)
+        if len(E)>0:
+            print('presence of low-information blocks detected...')
+            print(E)
     return True
 
 def check_labels(hdf5_dir):
@@ -1456,6 +1473,7 @@ if __name__ == '__main__':
     else:                            verbose  = False
     target_path = out_path+'/targets/'
     tensor_path = out_path+'/tensors/'
+    if not os.path.exists(out_path): os.mkdir(out_path)
     if not os.path.exists(target_path): os.mkdir(target_path)
     if not os.path.exists(tensor_path): os.mkdir(tensor_path)
     if args.hfm_in_path is None: hfm_files = []
@@ -1476,6 +1494,8 @@ if __name__ == '__main__':
         print('located target files for all vcf samples')
     if len(sms)>0 and all([os.path.exists(target_path+'/%s.pickle.gz'%sm) for sm in sms]):
         print('located target files for all hfm/vcf samples')
+    if len(hfm_sms)>0 and not all([os.path.exists(target_path+'/%s.pickle.gz'%sm) for sm in hfm_sms]): #just predict
+        print('located hfm files but not targets, assuming prediction only...')
     else:
         print('preparing target files from maxima, ref and vcf input files...')
         vcf_in_dir = '/'.join(vcf_in_path.rsplit('/')[:-1])

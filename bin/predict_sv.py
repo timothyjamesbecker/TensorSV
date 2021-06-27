@@ -4,19 +4,24 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import warnings
 warnings.simplefilter(action='ignore',category=Warning)
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
 import argparse
+import copy
+import datetime
 import time
 import json
 import glob
 import gzip
 import pickle
+import hashlib
 import itertools as it
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from h5py import File
 import h5py
-import matplotlib.pyplot as plt
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
   try:
@@ -750,6 +755,380 @@ def plot_scans(preds,rng,offs,classes): # rng is the range of plotting m = #mode
     plt.ylim(0.0,1.0)
     plt.show()
 
+def get_model_hash(models):
+    M,bts = {},b''
+    for m in models:
+        model_path = models[m]
+        if os.path.exists(model_path):
+            with open(model_path,'rb') as f:
+                bts += f.read()
+    hash_value = hashlib.md5(bts).hexdigest()
+    return hash_value
+
+def get_ref_chrom_hash(ref):
+    bts = b''+bytes(json.dumps(ref),'UTF-8')
+    hash_value = hashlib.md5(bts).hexdigest()
+    return hash_value
+
+def merge_calls(C,r=0.5,strategy='min',target=None,verbose=False):
+    S,M = {},{}
+    D,C2 = {},[] #remove exact duplicates: seq,start,end,geno
+    for i in range(len(C)):
+        k = (C[i][0],C[i][1],C[i][2],C[i][3])
+        if k in D: D[k] += [i]
+        else:      D[k]  = [i]
+    for d in D: C2 += [C[D[d][0]]]
+    C2 = sorted(C2,key=lambda x: (x[0].zfill(255),x[1])) #sort by seq,start
+    for i in range(len(C2)):
+        if C2[i][0] in S: S[C2[i][0]] += [C2[i]]
+        else:             S[C2[i][0]]  = [C2[i]]
+    for seq in S:
+        #(1) find overlap conflicts where overlap>=r
+        A,k = {i:set([]) for i in range(len(S[seq]))},1 #number of conflicts
+        for i in range(len(S[seq])):
+            for j in range(k,len(S[seq]),1):
+                if r<=overlap(S[seq][i],S[seq][j]):
+                    A[i].add(j)
+                    A[j].add(i)
+            k += 1
+        conflicts = {}
+        for a in A:
+            if len(A[a])>0: conflicts[a] = len(A[a])
+        if len(conflicts)>0 and verbose: print('seq=%s:\tmerging %s call conflicts out of %s calls'%(seq,len(conflicts),len(S[seq])))
+        elif verbose:                    print('seq=%s: no conflict calls to merge'%seq)
+
+        #(2) remove conflicts based on #of conflics and the likelihoods
+        if strategy=='min':
+            while len(conflicts)>0:
+                #select conflict idx----------------------------------
+                c = sorted(conflicts)[0]
+                max_c = [conflicts[c],c]
+                for c in conflicts:
+                    if conflicts[c]>max_c[0]: max_c = [conflicts[c],c]
+                idx = max_c[1]
+
+                #update conflicts----------------------------
+                A.pop(idx)
+                for a in A: A[a] = A[a].difference(set([idx]))
+                conflicts = {}
+                for a in A:
+                    if len(A[a])>0: conflicts[a] = len(A[a])
+        elif strategy=='size':
+            while len(conflicts)>0:
+                #select conflict idx----------------------------------
+                c = sorted(conflicts)[0]
+                b = sorted(A[c])[0]
+                max_c = [S[seq][b][3],b]
+                for b in A[c]:
+                    if S[seq][b][3]>S[seq][c][3]: max_c = [S[seq][c][3],c]
+                idx = max_c[1]
+
+                #update conflicts----------------------------
+                A.pop(idx)
+                for a in A: A[a] = A[a].difference(set([idx]))
+                conflicts = {}
+                for a in A:
+                    if len(A[a])>0: conflicts[a] = len(A[a])
+        elif strategy=='like':
+            while len(conflicts)>0:
+                #select conflict idx----------------------------------
+                #select conflict idx----------------------------------
+                c = sorted(conflicts)[0]
+                b = sorted(A[c])[0]
+                max_c = [S[seq][b][3],b]
+                for b in A[c]:
+                    if S[seq][c][5]<S[seq][b][5]: max_c = [S[seq][c][3],c]
+                idx = max_c[1]
+
+                #update conflicts----------------------------
+                A.pop(idx)
+                for a in A: A[a] = A[a].difference(set([idx]))
+                conflicts = {}
+                for a in A:
+                    if len(A[a])>0: conflicts[a] = len(A[a])
+        elif strategy=='multi':
+            while len(conflicts)>0:
+                #select conflict idx----------------------------------
+                c = sorted(conflicts)[0]
+                max_c = [conflicts[c],c]
+                for c in conflicts:
+                    if conflicts[c]>max_c[0]: max_c = [conflicts[c],c]
+                idx = max_c[1]
+
+                #update conflicts----------------------------
+                A.pop(idx)
+                for a in A: A[a] = A[a].difference(set([idx]))
+                conflicts = {}
+                for a in A:
+                    if len(A[a])>0: conflicts[a] = len(A[a])
+
+        #(3) sort by likelihoods and select the top target number if not None
+        S[seq] = [S[seq][idx] for idx in A]
+        if type(target) is dict:
+            for seq in target:
+                S[seq] = sorted(S[seq],key=lambda x: x[5])[::-1][0:int(0.5+min(target[seq],len(S[seq])))]
+                S[seq] = sorted(S[seq],key=lambda x: (x[0].zfill(255),x[1]))
+    return S
+
+def write_vcf(P,models,ref,sm,vcf_out,gz=True):
+    mh = get_model_hash(models)
+    ts = datetime.datetime.now()
+    R = []
+    for r in ref: R += [[ref[r],r]]
+    h = ['##fileformat=VCFv4.2',
+         '##fileDate=%s/%s/%s'%(str(ts.month).zfill(2),str(ts.day).zfill(2),str(ts.year)),
+         '##reference=md5_%s'%get_ref_chrom_hash(ref),
+         '##FILTER=<ID=LowQual,Description="Low Quality">',
+         '##FILTER=<ID=PASS,Description="All filters passed">',
+         '##ALT=<ID=DEL,Description="Deletion">',
+         '##ALT=<ID=DUP,Description="Duplication">',
+         '##ALT=<ID=INV,Description="Inversion">',
+         '##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the variant described in this record">',
+         '##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Difference in length between REF and ALT alleles">',
+         '##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">']
+    h += ['##INFO=<ID=MODEL_CLASS,Number=1,Type=String,Description="Maximal Filtered TensorSV Predicted Model Class">',
+          '##INFO=<ID=MODEL_LIKELIHOOD,Number=1,Type=Float,Description="TensorSV Predicted Model Class Likelihood Under the Model">',
+          '##INFO=<ID=MODEL_MD5,Number=1,Type=String,Description="MD5 Hash of the TensorSV Predictive Model">']
+    h += ['##contig=<ID=%s,length=%s>'%(x[1],x[0]) for x in sorted(R,key=lambda x: x[0])[::-1]]
+    h += ['#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s'%sm]
+
+    V = []
+    for i in range(len(P)):
+        info = 'SVTYPE=%s;SVLEN=%s;END=%s;IMPRECISE;MODEL_CLASS=%s.%s;MODEL_LIKELIHOOD=%s;MODEL_MD5=%s'%\
+               (sv,P[i][3],P[i][2],sv,P[i][4],P[i][5],mh)
+        vc = [P[i][0],P[i][1],'tensorsv_%s_%s'%(sv,P[i][7]),'.','<%s>'%sv,'.','PASS',info,'GT',('1/1' if P[i][4]==1.0 else '0/1')]
+        vc = [str(x) for x in vc]
+        V += [vc]
+
+    if not os.path.exists(vcf_out): os.mkdir(vcf_out)
+    s = '\n'.join(h)+'\n'
+    for i in range(len(V)): s += '\t'.join(V[i])+'\n'
+    if gz:
+        with gzip.GzipFile(vcf_out+'/%s.%s.tensorsv.vcf.gz'%(sv,sm),'wb') as f:
+            f.write(s.encode('UTF-8'))
+    else:
+        with open(vcf_out+'/%s.%s.tensorsv.vcf'%(sv,sm),'w') as f:
+            f.write(s)
+    print('finished writing VCF to disk')
+    return True
+
+def get_model_like_info(info):
+    return float(info.rsplit('MODEL_LIKELIHOOD=')[-1].rsplit(';')[0])
+
+def get_model_class_info(info):
+    return info.rsplit('MODEL_CLASS=')[-1].rsplit(';')[0]
+
+def get_svtype_info(info):
+    return info.rsplit('SVTYPE=')[-1].rsplit(';')[0]
+
+def get_end_info(info):
+    return int(info.rsplit('END=')[-1].rsplit(';')[0])
+
+def merge_vcfs(out_dir,sm,over=0.75,size_filt=[50,int(1E5)],alpha={'DEL':10.0,'INV':10.0,'DUP':10.0},
+               select_class=None,merge_types=False,merge_strategy='like',write=True,gz=True,verbose=True):
+    print('sm=%s merging vcf type files...'%sm)
+    raw,h,data,alt_i,info_i = [],None,[],4,7
+    for vcf in glob.glob(out_dir+'/*.%s.*.vcf'%sm)+glob.glob(out_dir+'/*.%s*.vcf.gz'%sm):
+        vcf_base = vcf.rsplit('/')[-1].rsplit('.')[0]
+        if vcf.endswith('.vcf.gz'):
+            with gzip.GzipFile(vcf,'rb') as f:
+                raw = [line.decode('UTF-8').replace('\n','') for line in f.readlines()]
+                h = []
+        elif vcf.endswith('.vcf'):
+            with open(vcf,'rb') as f:
+                raw = [line.decode('UTF-8').replace('\n','') for line in f.readlines()]
+                h = []
+        for row in raw:
+            if row.startswith('#'): h    += [row]
+            else:
+                form_row = row.rsplit('\t')
+                start,end = int(form_row[1]),get_end_info(form_row[info_i])
+                data += [[form_row[0],start,end]+form_row[2:]]
+    alt_i,info_i = alt_i+1,info_i+1
+    data = sorted(data,key=lambda x: (x[0].zfill(255),x[1]))
+    if size_filt is not None:
+        f_data = []
+        for row in data:
+            svlen = row[2]-row[1]+1
+            if svlen>=size_filt[0] and svlen<=size_filt[1]: f_data += [row]
+        if verbose: print('size filtered %s/%s SVs'%((len(data)-len(f_data)),len(data)))
+        data = f_data
+    if select_class is not None:
+        c_data = []
+        for row in data:
+            cl = get_model_class_info(row[info_i])
+            if cl.find(select_class)>=0: c_data += [row]
+        data = c_data
+    if merge_types:
+        print('merging sv %s subtype calls into DEL,DUP,INV...'%len(data))
+        #[1] organize all calls by svtype and chrom------------------------------
+        M,ks,m_data = {},set([]),[]
+        for i in range(len(data)):
+            k,sv = data[i][0],get_svtype_info(data[i][info_i])
+            ks.add(k)
+            if sv in M:
+                if k in M[sv]: M[sv][k] += [data[i]]
+                else:          M[sv][k]  = [data[i]]
+            else:              M[sv] =  {k:[data[i]]}
+        #[2] Map every svsubtype to a full type=> DUP:DISPERSED->DUP, etc...
+        K = {'DEL':{k:[] for k in ks},'DUP':{k:[] for k in ks},'INV':{k:[] for k in ks}}
+        for sv in M:
+            if sv=='DEL':
+                for k in M[sv]: K[sv][k] += M[sv][k]
+            #need to modify the ALT string and the INFO strings
+            if sv=='DUP:DISPERSED' or sv=='DUP:TANDEM' or sv=='DUP:ANEUPLOIDY' or sv=='DUP':
+                for k in M[sv]:
+                    for i in range(len(M[sv][k])):
+                        M[sv][k][i][info_i] = M[sv][k][i][info_i].replace('SVTYPE=%s'%sv,'SVTYPE=DUP')
+                        M[sv][k][i][alt_i]  = M[sv][k][i][alt_i].replace('<%s>'%sv,'<DUP>')
+                    K['DUP'][k] += M[sv][k]
+            if sv=='INV:PERFECT' or sv=='INV:COMPLEX' or sv=='INV':
+                for k in M[sv]:
+                    for i in range(len(M[sv][k])):
+                        M[sv][k][i][info_i] = M[sv][k][i][info_i].replace('SVTYPE=%s'%sv,'SVTYPE=INV')
+                        M[sv][k][i][alt_i]  = M[sv][k][i][alt_i].replace('<%s>'%sv,'<INV>')
+                    K['INV'][k] += M[sv][k]
+            if sv=='DUP:INV':
+                for k in M[sv]:
+                    DUP = copy.deepcopy(M[sv][k])
+                    for i in range(len(DUP)):
+                        DUP[i][info_i] = DUP[i][info_i].replace('SVTYPE=%s'%sv,'SVTYPE=DUP')
+                        DUP[i][alt_i]  = DUP[i][alt_i].replace('<%s>'%sv,'<DUP>')
+                    K['DUP'][k] += DUP
+                for k in M[sv]:
+                    INV = copy.deepcopy(M[sv][k])
+                    for i in range(len(INV)):
+                        INV[i][info_i] = INV[i][info_i].replace('SVTYPE=%s'%sv,'SVTYPE=INV')
+                        INV[i][alt_i]  = INV[i][alt_i].replace('<%s>'%sv,'<INV>')
+                    K['INV'][k] += INV
+        #[3] for each svtype now merge reciprocal overlapping svtypes based on maximal model liklihood
+        for sv in K:
+            for seq in K[sv]:
+                #(1) find overlap conflicts where overlap>=r
+                A,k = {i:set([]) for i in range(len(K[sv][seq]))},1 #number of conflicts
+                for i in range(len(K[sv][seq])):
+                    for j in range(k,len(K[sv][seq]),1):
+                        if over<=overlap(K[sv][seq][i],K[sv][seq][j]):
+                            A[i].add(j)
+                            A[j].add(i)
+                    k += 1
+                conflicts = {}
+                for a in A:
+                    if len(A[a])>0: conflicts[a] = len(A[a])
+                if len(conflicts)>0 and verbose: print('sv=%s\tseq=%s:\tmerging %s call conflicts out of %s calls'%\
+                                                       (sv,seq,len(conflicts),len(K[sv][seq])))
+                elif verbose:                    print('sv=%s\tseq=%s: no conflict calls to merge'%(sv,seq))
+                #(2) merge strategy any that have overlap>over here...
+                if merge_strategy=='min':
+                    while len(conflicts)>0:
+                        #select conflict idx----------------------------------
+                        c = sorted(conflicts)[0]
+                        max_c = [conflicts[c],c]
+                        for c in conflicts:
+                            if conflicts[c]>max_c[0]: max_c = [conflicts[c],c]
+                        idx = max_c[1]
+
+                        #update conflicts----------------------------
+                        A.pop(idx)
+                        for a in A: A[a] = A[a].difference(set([idx]))
+                        conflicts = {}
+                        for a in A:
+                            if len(A[a])>0: conflicts[a] = len(A[a])
+                elif merge_strategy=='like':
+                    while len(conflicts)>0:
+                        #select conflict idx----------------------------------
+                        c = sorted(conflicts)[0]
+                        b = sorted(A[c])[0]
+                        model_like = get_model_like_info(K[sv][seq][b][info_i])
+                        max_c = [model_like,b]
+                        for b in A[c]:
+                            model_like = get_model_like_info(K[sv][seq][b][info_i])
+                            if max_c[0]<=model_like: max_c = [model_like,c]
+                        idx = max_c[1]
+
+                        #update conflicts----------------------------
+                        A.pop(idx)
+                        for a in A: A[a] = A[a].difference(set([idx]))
+                        conflicts = {}
+                        for a in A:
+                            if len(A[a])>0: conflicts[a] = len(A[a])
+                K[sv][seq] = [K[sv][seq][idx] for idx in A]
+        #now upack all the types and seqs in a flat list and coordinate sort the result
+        m_data = []
+        for sv in K:
+            for seq in K[sv]:
+                for i in range(len(K[sv][seq])):
+                    m_data += [K[sv][seq][i]]
+        m_data = sorted(m_data,key=lambda x: (x[0].zfill(255),x[1]))
+        print('finished merging %s sv subtype calls into %s DEL,DUP,INV calls'%(len(data),len(m_data)))
+        data = m_data
+    if alpha is not None:
+        a_data,P = [],{}
+        for i in range(len(data)):
+            k,sv = data[i][0],get_svtype_info(data[i][info_i])
+            if sv not in P: P[sv]  = [data[i]]
+            else:           P[sv] += [data[i]]
+        for sv in P:
+            S = [vc for vc in P[sv]]
+            S  = sorted(S,key=lambda x: get_model_like_info(x[info_i]))[::-1]
+            x  = 0.0
+            for i in range(len(S)):
+                x += 1.0-min(1.0,get_model_like_info(S[i][info_i]))
+                if x>=alpha[sv]: break
+            if len(S)>0: S = S[:i+1]
+            a_data += S
+        if verbose: print('likelihood filtered %s/%s SVs'%((len(data)-len(a_data)),len(data)))
+        data = sorted(a_data,key=lambda x: (x[0].zfill(255),x[1]))
+    #final vcf write of all results----------------------------------------------------------------------------------
+    R = {}
+    for i in range(len(data)):
+        cl,sv = get_model_class_info(data[i][info_i]),get_svtype_info(data[i][info_i])
+        if sv not in R: R[sv] = {cl:1}
+        else:
+            if cl not in R[sv]: R[sv][cl]  = 1
+            else:               R[sv][cl] += 1
+    for sv in sorted(R):
+        for cl in sorted(R[sv]):
+            print('(sv=%s, cl=%s):%s'%(sv,cl,R[sv][cl]))
+    data = [vc[0:2]+vc[3:] for vc in data]
+    alt_i,info_i = alt_i-1,info_i-1
+    if write:
+        s = '\n'.join(h)+'\n'
+        for i in range(len(data)): s += '\t'.join([str(x) for x in data[i]])+'\n' #carve out the end int
+        if gz:
+            with gzip.GzipFile(out_dir+'/%s.tensorsv.vcf.gz'%sm,'wb') as f:
+                f.write(s.encode('UTF-8'))
+        else:
+            with open(out_dir+'/%s.tensorsv.vcf'%sm,'w') as f:
+                f.write(s)
+        print('finished writing VCF to disk')
+    print('')
+    return data
+
+def calibrate_alpha(in_dir,over,size_filt,alpha_ranges={'DEL':[0.01,10.0],'DUP':[0.01,10.0],'INV':[0.01,10.0]}):
+    return True
+
+#-----------------------------------------------------------------------------------------------------------------------
+cal_dir = '/media/data/g1kp3hc_predict_S51/'
+in_dir = '/media/data/tcrboa_predict_S51/'
+over = 0.5
+size_filt = [0,1000000]
+alpha = {'DEL':100.0,'DUP':100.0,'INV':100.0}
+data = merge_vcfs(cal_dir,'HG00096',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG00419',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG01565',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG01583',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG01595',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG01879',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'HG03742',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(cal_dir,'NA12878',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+
+data = merge_vcfs(in_dir,'TCRBOA6_N',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(in_dir,'TCRBOA6_T',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(in_dir,'TCRBOA7_N',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+data = merge_vcfs(in_dir,'TCRBOA7_T',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
+#------------------------------------------------------------------------------------------------------------------------
+
 if __name__ == '__main__':
     des = """predict_sv: TensorSV Prediction Framework v0.1.2\nCopyright (C) 2020-2021 Timothy James Becker\n"""
     parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
@@ -757,7 +1136,8 @@ if __name__ == '__main__':
     parser.add_argument('--run_dir',type=str,help='training run directory\t[None]')
     parser.add_argument('--out_dir',type=str,help='pickle/VCF outut directory\t[None]')
     parser.add_argument('--samples',type=str,help='comma seperated list of sample names to take from base_directory\t[all]')
-    parser.add_argument('--sv_type',type=str,help='DEL,DUP,CNV,INV,INS\t[DEL]')
+    parser.add_argument('--sv_types',type=str,help='DEL,DUP,CNV,INV,INS\t[DEL]')
+    parser.add_argument('--accum_error',type=float,help='total accumulated predicitive error estimateS\t[100.0]')
     parser.add_argument('--seqs',type=str,help='comma seperated sequences to predict on\t[all]')
     parser.add_argument('--gpu_num',type=int,help='pick one of your available logical gpus\t[None]')
     args = parser.parse_args()
@@ -787,246 +1167,418 @@ if __name__ == '__main__':
         for norm in norms:
             sm = norm.split('/')[-1].split('.')[0]
             samples[sm] = norm
-    if args.sv_type is not None:
-        sv = args.sv_type
-    else: sv = 'DEL'
+    if args.sv_types is not None:
+        svs = args.sv_types.split(',')
+    else: svs = ['DEL']
     if args.seqs is not None:
         selected_seqs = args.seqs.rsplit(',')
     else:
         selected_seqs = 'all'
+    if args.accum_error is not None:
+        accum_error = args.accum_error
+    else:
+        accum_error = 100.0
     if args.gpu_num is not None:        gpu_num  = args.gpu_num
     else:                               gpu_num  = 0
 
-    model_path  = run_dir+'/test/models/all-%s-L.model.hdf5'%sv
-    if os.path.exists(model_path):
-        five_models = {'L': run_dir+  '/test/models/all-%s-L.model.hdf5'%sv,
-                       'R': run_dir+  '/test/models/all-%s-R.model.hdf5'%sv,
-                       'LR': run_dir+ '/test/models/all-%s-LR.model.hdf5'%sv}
-    else:
-        five_models = {'L': run_dir+  '/models/all-%s-L.model.hdf5'%sv,
-                       'R': run_dir+  '/models/all-%s-R.model.hdf5'%sv,
-                       'LR': run_dir+ '/models/all-%s-LR.model.hdf5'%sv}
-
-    model_base = five_models[sorted(five_models)[0]].rsplit('/')[-1].rsplit('.model.hdf5')[0]
-    score_path = run_dir+'/test/scores/%s.score.json'%model_base
-    if os.path.exists(score_path):
-        with open(score_path,'r') as sf: score_data = json.load(sf)
-    else:
-        score_path = run_dir+'/scores/%s.score.json'%model_base
-        with open(score_path,'r') as sf: score_data = json.load(sf)
-
-    #better testing frame work for iteration...
-    zoom_models = {'CNN':run_dir+'/models/L0-%s-LR.model.hdf5'%sv}
-
-    if os.path.exists(base_dir+'/sms.maxima.json'):
-        with open(base_dir+'/sms.maxima.json','r') as f: mask = json.load(f)
-    if os.path.exists(base_dir+'/vcf/sms.maxima.json'):
-        with open(base_dir+'/vcf/sms.maxima.json','r') as f: mask = json.load(f)
-    with tf.device('/gpu:%s'%gpu_num):
-        for sm in sorted(samples):
-            s_start = time.time()
-            print('::::::::::::::::::::::::::::::::::::::starting %s :::::::::::::::::::::::::::::::::::::::::::::::'%samples[sm].rsplit('/')[-1])
-            f    = File(samples[sm],'r')
-            sm   = list(f.keys())[0]
-            rg   = list(f[sm].keys())[0]
-            seqs = sorted(list(f[sm][rg].keys()),key=lambda x: x.zfill(255))
-            if os.path.exists(base_dir+'/targets/%s.pickle.gz'%sm):
-                vc_path   = base_dir+'/targets/%s.pickle.gz'%sm
-            elif os.path.exists(base_dir+'/targets/%s_T.pickle.gz'%sm):
-                vc_path   = base_dir+'/targets/%s_T.pickle.gz'%sm
-            if os.path.exists(glob.glob(base_dir+'/comp/%s*.pickle.gz'%sm)[0]):
-                comp_path = glob.glob(base_dir+'/comp/%s*.pickle.gz'%sm)[0]
-            elif os.path.exists(glob.glob(base_dir+'/comp/%s_T*.pickle.gz'%sm)[0]):
-                comp_path = glob.glob(base_dir+'/comp/%s_T*.pickle.gz'%sm)[0]
+    total_start = time.time()
+    join_vcfs = False
+    for sv in svs:
+        print('working on sv=%s'%sv)
+        model_path  = run_dir+'/models/all-%s-L.model.hdf5'%sv
+        if os.path.exists(model_path):
+            five_models = {'L': run_dir+  '/models/all-%s-L.model.hdf5'%sv,
+                           'R': run_dir+  '/models/all-%s-R.model.hdf5'%sv,
+                           'LR': run_dir+ '/models/all-%s-LR.model.hdf5'%sv}
+        elif os.path.exists(run_dir+'/test/models/all-%s-L.model.hdf5'%sv):
+            five_models = {'L': run_dir+  '/test/models/all-%s-L.model.hdf5'%sv,
+                           'R': run_dir+  '/test/models/all-%s-R.model.hdf5'%sv,
+                           'LR': run_dir+ '/test/models/all-%s-LR.model.hdf5'%sv}
+        if not (os.path.exists(model_path) or os.path.exists(run_dir+'/test/models/all-%s-L.model.hdf5'%sv)):
+            print('could not locate models for sv=%s, checking possible supertypes...'%sv)
+        else:
+            model_base = five_models[sorted(five_models)[0]].rsplit('/')[-1].rsplit('.model.hdf5')[0]
+            score_path = run_dir+'/scores/%s.score.json'%model_base
+            if os.path.exists(score_path):
+                with open(score_path,'r') as sf: score_data = json.load(sf)
             else:
-                comp_path = ''
-            with gzip.GzipFile(vc_path,'rb') as vf:
-                D = pickle.load(vf)
-                T = {}
-                for d in D[sv]:
-                    if selected_seqs=='all' or d[0] in selected_seqs:
-                        if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
-                        if d[3]>=0: # [0-100]=50 to [100-1000]=500 with midpoint = 50 + 450/2 = [275]
-                            if d[0] in T: T[d[0]] += [d]
-                            else:         T[d[0]]  = [d]
-                for k in T: T[k] = sorted(T[k],key=lambda x: (x[0].zfill(255),x[1]))
-            if os.path.exists(comp_path):
-                with gzip.GzipFile(comp_path,'rb') as vf:
-                    D = pickle.load(vf)
-                    if 'type' in D: D = D['type']
-                    if sv in D: #do a partial match of sv INV:PERFECT -> INV
-                        Q = {}
-                        for a_id in D[sv]:
-                            d = D[sv][a_id][sm]
-                            if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
-                            if d[3]>=0:
-                                if d[0] in Q: Q[d[0]] += [d]
-                                else:         Q[d[0]]  = [d]
-                        for k in Q: Q[k] = sorted(Q[k],key=lambda x: (x[0].zfill(255),x[1]))
-                    elif sv.rsplit(':')[0] in D:
-                        sv_super = sv.rsplit(':')[0]
-                        Q = {}
-                        for a_id in D[sv_super]:
-                            d = D[sv_super][a_id][sm]
-                            if sv_super=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
-                            if d[3]>=0:
-                                if d[0] in Q: Q[d[0]] += [d]
-                                else:         Q[d[0]]  = [d]
-                        for k in Q: Q[k] = sorted(Q[k],key=lambda x: (x[0].zfill(255),x[1]))
+                score_path = run_dir+'/test/scores/%s.score.json'%model_base
+                with open(score_path,'r') as sf: score_data = json.load(sf)
+            if 'tracks' in score_data['params']:
+                model_ftr = score_data['params']['tracks']
+            else:
+                model_ftr = 'all'
+            #better testing frame work for iteration...
+            zoom_models = {'CNN':run_dir+'/models/L0-%s-LR.model.hdf5'%sv}
+
+            ref,mask = {},{}
+            if os.path.exists(base_dir+'/ref.meta.json'):
+                with open(base_dir+'/ref.meta.json','r') as f:       ref = json.load(f)
+            if os.path.exists(base_dir+'/vcf/ref.meta.json'):
+                with open(base_dir+'/vcf/ref.meta.json','r') as f:   ref = json.load(f)
+            if os.path.exists(base_dir+'/sms.maxima.json'):
+                with open(base_dir+'/sms.maxima.json','r') as f:     mask = json.load(f)
+            if os.path.exists(base_dir+'/vcf/sms.maxima.json'):
+                with open(base_dir+'/vcf/sms.maxima.json','r') as f: mask = json.load(f)
+            with tf.device('/gpu:%s'%gpu_num):
+                for sm in sorted(samples):
+                    s_start = time.time()
+                    print('::::::::::::::::::::::::::::::::::::::starting %s :::::::::::::::::::::::::::::::::::::::::::::::'%samples[sm].rsplit('/')[-1])
+                    f    = File(samples[sm],'r')
+                    sm   = list(f.keys())[0]
+                    rg   = list(f[sm].keys())[0]
+                    seqs = sorted(list(f[sm][rg].keys()),key=lambda x: x.zfill(255))
+                    vc_path = None
+                    if os.path.exists(base_dir+'/targets/%s.pickle.gz'%sm):
+                        vc_path   = base_dir+'/targets/%s.pickle.gz'%sm
+                    elif os.path.exists(base_dir+'/targets/%s_T.pickle.gz'%sm):
+                        vc_path   = base_dir+'/targets/%s_T.pickle.gz'%sm
+                    if len(glob.glob(base_dir+'/comp/%s*.pickle.gz'%sm))>0:
+                        comp_path = glob.glob(base_dir+'/comp/%s*.pickle.gz'%sm)[0]
+                    elif len(glob.glob(base_dir+'/comp/%s_T*.pickle.gz'%sm))>0:
+                        comp_path = glob.glob(base_dir+'/comp/%s_T*.pickle.gz'%sm)[0]
+                    else:
+                        comp_path = ''
+                    T = {}
+                    if vc_path is not None:
+                        with gzip.GzipFile(vc_path,'rb') as vf:
+                            D = pickle.load(vf)
+                            if sv in D:
+                                for d in D[sv]:
+                                    if selected_seqs=='all' or d[0] in selected_seqs:
+                                        if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
+                                        if d[3]>=0: # [0-100]=50 to [100-1000]=500 with midpoint = 50 + 450/2 = [275]
+                                            if d[0] in T: T[d[0]] += [d]
+                                            else:         T[d[0]]  = [d]
+                                for k in T: T[k] = sorted(T[k],key=lambda x: (x[0].zfill(255),x[1]))
+                            elif sv.split(':')[0] in D:
+                                s_sv = sv.split(':')[0]
+                                for d in D[s_sv]:
+                                    if selected_seqs=='all' or d[0] in selected_seqs:
+                                        if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
+                                        if d[3]>=0: # [0-100]=50 to [100-1000]=500 with midpoint = 50 + 450/2 = [275]
+                                            if d[0] in T: T[d[0]] += [d]
+                                            else:         T[d[0]]  = [d]
+                                for k in T: T[k] = sorted(T[k],key=lambda x: (x[0].zfill(255),x[1]))
+                            else:
+                                for s_sv in D:
+                                    if s_sv.find(sv)>-1:
+                                        for d in D[s_sv]:
+                                            if selected_seqs=='all' or d[0] in selected_seqs:
+                                                if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
+                                                if d[3]>=0: # [0-100]=50 to [100-1000]=500 with midpoint = 50 + 450/2 = [275]
+                                                    if d[0] in T: T[d[0]] += [d]
+                                                    else:         T[d[0]]  = [d]
+                                        for k in T: T[k] = sorted(T[k],key=lambda x: (x[0].zfill(255),x[1]))
+                    if os.path.exists(comp_path):
+                        with gzip.GzipFile(comp_path,'rb') as vf:
+                            D = pickle.load(vf)
+                            if 'type' in D: D = D['type']
+                            if sv in D: #do a partial match of sv INV:PERFECT -> INV
+                                Q = {}
+                                for a_id in D[sv]:
+                                    d = D[sv][a_id][sm]
+                                    if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
+                                    if d[3]>=0:
+                                        if d[0] in Q: Q[d[0]] += [d]
+                                        else:         Q[d[0]]  = [d]
+                                for k in Q: Q[k] = sorted(Q[k],key=lambda x: (x[0].zfill(255),x[1]))
+                            elif sv.rsplit(':')[0] in D:
+                                sv = sv.rsplit(':')[0]
+                                Q = {}
+                                for a_id in D[sv]:
+                                    d = D[sv][a_id][sm]
+                                    if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
+                                    if d[3]>=0:
+                                        if d[0] in Q: Q[d[0]] += [d]
+                                        else:         Q[d[0]]  = [d]
+                                for k in Q: Q[k] = sorted(Q[k],key=lambda x: (x[0].zfill(255),x[1]))
+                            else:
+                                Q = {}
+                                for seq in T: Q[seq] = []
                     else:
                         Q = {}
                         for seq in T: Q[seq] = []
-            else:
-                Q = {}
-                for seq in T: Q[seq] = []
-            #vc is [seq,start,end,svl,ht,naf,cn,a_id]
-            print('read targets information')
-            N,V,bw,zws = {},{'five':{'L,R':[],'LR':[]},'zoom':{}},25,[50]
-            for seq in sorted(T)[::-1]:
-                seq_start = time.time()
-                if seq in f[sm][rg]: #check to see if it was processed
-                    start = time.time()
+                    #vc is [seq,start,end,svl,ht,naf,cn,a_id]
+                    print('read targets information for sv=%s'%sv)
+                    N,V,bw,zws = {},{'five':{'L,R':[],'LR':[]},'zoom':{}},25,[50]
+                    if len(T)>0: #deal with no truth data set
+                        for seq in sorted(T)[::-1]:
+                            seq_start = time.time()
+                            if seq in f[sm][rg]: #check to see if it was processed
+                                start = time.time()
 
-                    labels = score_data['params']['labels']
-                    base_score = float(score_data['score'])
-                    geno_bins = []
-                    for l in labels:
-                        sv_type = l.rsplit('.')[0]
-                        geno    = float('.'.join(l.rsplit('.')[1:]))
-                        if sv_type!='NOT': geno_bins += [geno]
-                    geno_bins = sorted(geno_bins)
-                    batch_size,classes = 4096,len(labels)
-                    #works with the five norm or zoom norm files
-                    if type(f[sm][rg][seq]) is h5py._hl.dataset.Dataset:
-                        ms      = f[sm][rg][seq].attrs['m']
-                        ftr_idx = get_ftr_idx(f[sm][rg][seq])
-                        th      = get_trans_hist(f[sm][rg][seq],ms)
-                        data    = np.zeros(f[sm][rg][seq].shape,dtype=np.float32)
-                        data[:] = f[sm][rg][seq][:]
-                    else:
-                        ms      = f[sm][rg][seq][str(bw)].attrs['m']
-                        ftr_idx = get_ftr_idx(f[sm][rg][seq][str(bw)])
-                        th      = get_trans_hist(f[sm][rg][seq][str(bw)],ms)
-                        data    = np.zeros(f[sm][rg][seq][str(bw)].shape,dtype=np.float32)
-                        data[:] = f[sm][rg][seq][str(bw)][:]
-                    stop = time.time()
-                    print('loaded sm=%s, rg=%s, seq=%s data in %s sec'%(sm,rg,seq,round(stop-start,2)))
-                    print('checking w=%s---------------------------------------------------------------'%bw)
-                    #model scanner
-                    start  = time.time()
-                    sv_mask = [[x[0]//bw,x[1]//bw] for x in mask[seq]]
-                    M = {}
-                    for mdl in five_models:
-                        if mdl !='LR': M[mdl] = keras.models.load_model(five_models[mdl])
-                    pred = predict_and_pack(data,M,sv_mask)
-                    stop  = time.time()
-                    print('scanned models=%s and applied mask regions in %s sec'%(M.keys(),round(stop-start,2)))
-                    #:::::::CLUSTER:::PREDICTIONS:::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-                    start = time.time() #scan the likelihood estimates for L and R breakpoint ranges
-                    order = {'L':0,'R':1}
-                    hs    = {}
-                    for i in range(1,classes,1): hs[i] = sorted(geno_bins)[i-1]
-                    if sv=='DEL':   flank,max_w,k_c = 1.0,100,5
-                    elif sv=='DUP': flank,max_w,k_c = 2.0,200,3
-                    elif sv=='INV': flank,max_w,k_c = 0.5,100,3
-                    else:           flank,max_w,k_c = 0.5,100,3
-                    min_p = 0.5
-                    B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
-                    C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
-                    if len(C)<=0:
-                        print('no clustered pairs found for sv=%s on seq=%s'%(sv,seq))
-                        K,KS = [],[]
-                    elif not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
-                        while not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]) and base_score>=min_p:
-                            base_score-=0.01
-                            C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
-                        if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
-                            K,KS = [],[]
+                                labels = score_data['params']['labels']
+                                base_score = float(score_data['score'])
+                                geno_bins = []
+                                for l in labels:
+                                    sv_type = l.rsplit('.')[0]
+                                    geno    = float('.'.join(l.rsplit('.')[1:]))
+                                    if sv_type!='NOT': geno_bins += [geno]
+                                geno_bins = sorted(geno_bins)
+                                batch_size,classes = 4096,len(labels)
+                                #works with the five norm or zoom norm files
+                                if type(f[sm][rg][seq]) is h5py._hl.dataset.Dataset:
+                                    ms      = f[sm][rg][seq].attrs['m']
+                                    ftr_idx = get_ftr_idx(f[sm][rg][seq])
+                                    th      = get_trans_hist(f[sm][rg][seq],ms)
+                                    data    = np.zeros(f[sm][rg][seq].shape,dtype=np.float32)
+                                    data[:] = f[sm][rg][seq][:]
+                                else:
+                                    ms      = f[sm][rg][seq][str(bw)].attrs['m']
+                                    ftr_idx = get_ftr_idx(f[sm][rg][seq][str(bw)])
+                                    th      = get_trans_hist(f[sm][rg][seq][str(bw)],ms)
+                                    data    = np.zeros(f[sm][rg][seq][str(bw)].shape,dtype=np.float32)
+                                    data[:] = f[sm][rg][seq][str(bw)][:]
+                                stop = time.time()
+                                print('loaded sm=%s, rg=%s, seq=%s data in %s sec'%(sm,rg,seq,round(stop-start,2)))
+                                print('checking w=%s---------------------------------------------------------------'%bw)
+                                #model scanner
+                                start  = time.time()
+                                sv_mask = [[x[0]//bw,x[1]//bw] for x in mask[seq]]
+                                M = {}
+                                for mdl in five_models:
+                                    if mdl !='LR': M[mdl] = keras.models.load_model(five_models[mdl])
+                                if model_ftr!='all':
+                                    idx = []
+                                    for ftr in ftr_idx:
+                                        if ftr in model_ftr: idx += [ftr_idx[ftr]]
+                                    data = data[:,idx,:]
+                                pred = predict_and_pack(data,M,sv_mask)
+                                stop  = time.time()
+                                print('scanned models=%s and applied mask regions in %s sec'%(M.keys(),round(stop-start,2)))
+                                #:::::::CLUSTER:::PREDICTIONS:::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+                                start = time.time() #scan the likelihood estimates for L and R breakpoint ranges
+                                order = {'L':0,'R':1}
+                                hs    = {}
+                                for i in range(1,classes,1): hs[i] = sorted(geno_bins)[i-1]
+                                if sv=='DEL':   flank,max_w,k_c = 1.0,100,5
+                                elif sv=='DUP': flank,max_w,k_c = 2.0,200,3
+                                elif sv=='INV': flank,max_w,k_c = 0.5,100,3
+                                else:           flank,max_w,k_c = 0.5,100,3
+                                min_p = 0.5
+                                B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
+                                C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
+                                if len(C)<=0:
+                                    print('no clustered pairs found for sv=%s on seq=%s'%(sv,seq))
+                                    K,KS = [],[]
+                                elif not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
+                                    while not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]) and base_score>=min_p:
+                                        base_score-=0.01
+                                        C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
+                                    if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
+                                        K,KS = [],[]
+                                    else:
+                                        K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                        KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
+                                else:
+                                    K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                    KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
+                                if sv=='INS':
+                                    for i in range(len(KS)):
+                                        KS[i][1] = KS[i][1]-500
+                                        KS[i][2] = KS[i][2]+500
+                                        KS[i][3] = KS[i][3]+1000
+                                V['five']['L,R'] += KS
+                            else:
+                                print('tensor was not processed for seq=%s score=%s'%(seq,sv_score(T[seq],[])))
+
+                            # print('starting %s five-L,R(%s)=>five-LR(%s) searches -------------------------------------------'%(len(K),bw,bw))
+                            # start = time.time()
+                            # MLR = {'LR':keras.models.load_model(five_models['LR'])}
+                            # lr_order = {'LR':0}
+                            # pred  = predict_and_pack(data,MLR,sv_mask)
+                            # lr_B     = scan_breaks(pred,m_labels=list(MLR.keys()),classes=classes)
+                            # lr_K     = lr_breaks_to_calls(lr_B[0],seq,pred,min_p=base_score,w=bw,n=11)
+                            # ############################################################################################################
+                            # PS = pred_from_vca(data,
+                            #                    five_models,
+                            #                    K,
+                            #                    hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
+                            # KF = sorted(PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(PS)))]
+                            # print('starting %s five-LR(%s)=>five-LR(%s) searches -------------------------------------------'%(len(lr_K),bw,bw))
+                            # lr_PS = pred_from_vca(data,
+                            #                       five_models,
+                            #                       lr_K,
+                            #                       hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
+                            # lr_KF = sorted(lr_PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(lr_PS)))]
+                            #
+                            # V['five']['LR'] += KF
+                            V['five']['LR'] = []
+                            KF = []
+                            lr_KF = []
+                            # stop = time.time()
+                            # print('L,R=>LR fitting time was %s sec' % round(stop-start,2))
+
+                            #scoring and merging........................
+                            if seq in Q:
+                                print('comp score=%s'%sv_score(T[seq],Q[seq]))
+                            else:
+                                print('comp score=%s'%sv_score(T[seq],[]))
+                            print('L,R  score=%s'%sv_score(T[seq],KS))
+                            print('L,R=>LR score=%s'%sv_score(T[seq],KF))
+                            print('LR=>LR score=%s'%sv_score(T[seq],lr_KF))
+                            seq_stop = time.time()
+                            print('seq=%s was processed in %s sec'%(seq,round(seq_stop-seq_start,2)))
+
+                        o_score1 = opt_score(V['five']['L,R'],T,metric='f1')
+                        o_score2 = opt_score(V['five']['LR'],T,metric='f1')
+                        if o_score1>o_score2:
+                            o_score,W = o_score1,V['five']['L,R']
+                            print('L,R=%s performed better than LR=%s'%(V['five']['L,R'],V['five']['LR']))
                         else:
-                            K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
-                            KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
+                            o_score,W = o_score2,V['five']['LR']
+                            print('LR=%s performed better than L,R=%s'%(V['five']['LR'],V['five']['L,R']))
+                        print('using sv=%s opt_score=%s'%(sv,o_score))
+                        #score the results-----------------------------------------------------------------------
+                        target = {}
+                        for row in W:
+                            if row[0] in T and not row[0] in target: target[row[0]] = int(round(1.0*len(T[row[0]])))
+                        ts = {}
+                        for seq in T:
+                            if seq in target: ts[seq] = T[seq]
+                        qs = {}
+                        for seq in Q:
+                            if seq in target: qs[seq] = Q[seq]
+                        SV = merge_calls(W,r=0.75,strategy='like',target=target)
+
+                        vca = []
+                        for seq in SV: vca += SV[seq]
+                        vca = sorted(vca,key=lambda x: (x[0].zfill(255),x[1]))
+
+                        print('comp score=%s' % sv_score(ts,qs))
+                        print('tensor score=%s'%sv_score(ts,SV))
+
+                        print('saving pickled results...')
+                        if not os.path.exists(out_dir): os.mkdir(out_dir)
+                        with gzip.GzipFile(out_dir+'/%s.%s.tensorsv.pickle.gz'%(sm,sv),'wb') as f:
+                            D = {sm:{sv:{'vca':{'tensor':W,'ts':ts,'comp':qs},'score':sv_score(ts,SV),'opt_score':o_score}}}
+                            pickle.dump(D,f)
+                            print(True)
                     else:
-                        K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
-                        KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
-                    if sv=='INS':
-                        for i in range(len(KS)):
-                            KS[i][1] = KS[i][1]-500
-                            KS[i][2] = KS[i][2]+500
-                            KS[i][3] = KS[i][3]+1000
-                    V['five']['L,R'] += KS
-                else:
-                    print('tensor was not processed for seq=%s score=%s'%(seq,sv_score(T[seq],[])))
+                        join_vcfs = True
+                        for seq in seqs:
+                            if seq in selected_seqs or selected_seqs=='all':
+                                seq_start = time.time()
+                                start = time.time()
 
-                # print('starting %s five-L,R(%s)=>five-LR(%s) searches -------------------------------------------'%(len(K),bw,bw))
-                # start = time.time()
-                # MLR = {'LR':keras.models.load_model(five_models['LR'])}
-                # lr_order = {'LR':0}
-                # pred  = predict_and_pack(data,MLR,sv_mask)
-                # lr_B     = scan_breaks(pred,m_labels=list(MLR.keys()),classes=classes)
-                # lr_K     = lr_breaks_to_calls(lr_B[0],seq,pred,min_p=base_score,w=bw,n=11)
-                # ############################################################################################################
-                # PS = pred_from_vca(data,
-                #                    five_models,
-                #                    K,
-                #                    hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
-                # KF = sorted(PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(PS)))]
-                # print('starting %s five-LR(%s)=>five-LR(%s) searches -------------------------------------------'%(len(lr_K),bw,bw))
-                # lr_PS = pred_from_vca(data,
-                #                       five_models,
-                #                       lr_K,
-                #                       hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
-                # lr_KF = sorted(lr_PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(lr_PS)))]
-                #
-                # V['five']['LR'] += KF
-                V['five']['LR'] = []
-                KF = []
-                lr_KF = []
-                # stop = time.time()
-                # print('L,R=>LR fitting time was %s sec' % round(stop-start,2))
+                                labels = score_data['params']['labels']
+                                base_score = float(score_data['score'])
+                                geno_bins = []
+                                for l in labels:
+                                    sv_type = l.rsplit('.')[0]
+                                    geno    = float('.'.join(l.rsplit('.')[1:]))
+                                    if sv_type!='NOT': geno_bins += [geno]
+                                geno_bins = sorted(geno_bins)
+                                batch_size,classes = 4096,len(labels)
+                                #works with the five norm or zoom norm files
+                                if type(f[sm][rg][seq]) is h5py._hl.dataset.Dataset:
+                                    ms      = f[sm][rg][seq].attrs['m']
+                                    ftr_idx = get_ftr_idx(f[sm][rg][seq])
+                                    th      = get_trans_hist(f[sm][rg][seq],ms)
+                                    data    = np.zeros(f[sm][rg][seq].shape,dtype=np.float32)
+                                    data[:] = f[sm][rg][seq][:]
+                                else:
+                                    ms      = f[sm][rg][seq][str(bw)].attrs['m']
+                                    ftr_idx = get_ftr_idx(f[sm][rg][seq][str(bw)])
+                                    th      = get_trans_hist(f[sm][rg][seq][str(bw)],ms)
+                                    data    = np.zeros(f[sm][rg][seq][str(bw)].shape,dtype=np.float32)
+                                    data[:] = f[sm][rg][seq][str(bw)][:]
+                                stop = time.time()
+                                print('loaded sm=%s, rg=%s, seq=%s data in %s sec'%(sm,rg,seq,round(stop-start,2)))
+                                print('checking w=%s---------------------------------------------------------------'%bw)
+                                #model scanner
+                                start  = time.time()
+                                sv_mask = [[x[0]//bw,x[1]//bw] for x in mask[seq]]
+                                M = {}
+                                for mdl in five_models:
+                                    if mdl !='LR': M[mdl] = keras.models.load_model(five_models[mdl])
+                                pred = predict_and_pack(data,M,sv_mask)
+                                stop  = time.time()
+                                print('scanned models=%s and applied mask regions in %s sec'%(M.keys(),round(stop-start,2)))
+                                #:::::::CLUSTER:::PREDICTIONS:::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+                                start = time.time() #scan the likelihood estimates for L and R breakpoint ranges
+                                order = {'L':0,'R':1}
+                                hs    = {}
+                                for i in range(1,classes,1): hs[i] = sorted(geno_bins)[i-1]
+                                if sv=='DEL':   flank,max_w,k_c = 1.0,100,5
+                                elif sv=='DUP': flank,max_w,k_c = 2.0,200,3
+                                elif sv=='INV': flank,max_w,k_c = 0.5,100,3
+                                else:           flank,max_w,k_c = 0.5,100,3
+                                min_p = 0.5
+                                B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
+                                C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
+                                if len(C)<=0:
+                                    print('no clustered pairs found for sv=%s on seq=%s'%(sv,seq))
+                                    K,KS = [],[]
+                                elif not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
+                                    while not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]) and base_score>=min_p:
+                                        base_score-=0.01
+                                        C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
+                                    if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
+                                        K,KS = [],[]
+                                    else:
+                                        K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                        KS = sorted(K,key=lambda x: x[5])[::-1]
+                                else:
+                                    K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                    KS = sorted(K,key=lambda x: x[5])[::-1]
+                                if sv=='INS':
+                                    for i in range(len(KS)):
+                                        KS[i][1] = KS[i][1]-500
+                                        KS[i][2] = KS[i][2]+500
+                                        KS[i][3] = KS[i][3]+1000
+                                if len(KS)<1: print('no calls for seq=%s made'%seq)
+                                V['five']['L,R'] += KS
 
-                #scoring and merging........................
-                if seq in Q:
-                    print('comp score=%s'%sv_score(T[seq],Q[seq]))
-                else:
-                    print('comp score=%s'%sv_score(T[seq],[]))
-                print('L,R  score=%s'%sv_score(T[seq],KS))
-                print('L,R=>LR score=%s'%sv_score(T[seq],KF))
-                print('LR=>LR score=%s'%sv_score(T[seq],lr_KF))
-                seq_stop = time.time()
-                print('seq=%s was processed in %s sec'%(seq,round(seq_stop-seq_start,2)))
-            f.close()
+                                # print('starting %s five-L,R(%s)=>five-LR(%s) searches -------------------------------------------'%(len(K),bw,bw))
+                                # start = time.time()
+                                # MLR = {'LR':keras.models.load_model(five_models['LR'])}
+                                # lr_order = {'LR':0}
+                                # pred  = predict_and_pack(data,MLR,sv_mask)
+                                # lr_B     = scan_breaks(pred,m_labels=list(MLR.keys()),classes=classes)
+                                # lr_K     = lr_breaks_to_calls(lr_B[0],seq,pred,min_p=base_score,w=bw,n=11)
+                                # ############################################################################################################
+                                # PS = pred_from_vca(data,
+                                #                    five_models,
+                                #                    K,
+                                #                    hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
+                                # KF = sorted(PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(PS)))]
+                                # print('starting %s five-LR(%s)=>five-LR(%s) searches -------------------------------------------'%(len(lr_K),bw,bw))
+                                # lr_PS = pred_from_vca(data,
+                                #                       five_models,
+                                #                       lr_K,
+                                #                       hs=hs,w=bw,flank=flank,max_w=max_w,verbose=False)[0]
+                                # lr_KF = sorted(lr_PS,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(lr_PS)))]
+                                #
+                                # V['five']['LR'] += KF
+                                V['five']['LR'] = []
+                                KF = []
+                                lr_KF = []
+                                # stop = time.time()
+                                # print('L,R=>LR fitting time was %s sec' % round(stop-start,2))
 
-            o_score1 = opt_score(V['five']['L,R'],T,metric='f1')
-            o_score2 = opt_score(V['five']['LR'],T,metric='f1')
-            if o_score1>o_score2:
-                o_score,W = o_score1,V['five']['L,R']
-                print('L,R=%s performed better than LR=%s'%(V['five']['L,R'],V['five']['LR']))
-            else:
-                o_score,W = o_score2,V['five']['LR']
-                print('LR=%s performed better than L,R=%s'%(V['five']['LR'],V['five']['L,R']))
-
-            #score the results-----------------------------------------------------------------------
-            target = {}
-            for row in W:
-                if row[0] in T and not row[0] in target: target[row[0]] = int(round(1.0*len(T[row[0]])))
-            ts = {}
-            for seq in T:
-                if seq in target: ts[seq] = T[seq]
-            qs = {}
-            for seq in Q:
-                if seq in target: qs[seq] = Q[seq]
-            SV = merge_calls(W,r=0.75,strategy='like',target=target)
-
-            vca = []
-            for seq in SV: vca += SV[seq]
-            vca = sorted(vca,key=lambda x: (x[0].zfill(255),x[1]))
-
-            print('comp score=%s' % sv_score(ts,qs))
-            print('tensor score=%s'%sv_score(ts,SV))
-
-            print('saving pickled results...')
-            if not os.path.exists(out_dir): os.mkdir(out_dir)
-            with gzip.GzipFile(out_dir+'/%s.%s.tensorsv.pickle.gz'%(sm,sv),'wb') as f:
-                D = {sm:{sv:{'vca':{'tensor':W,'ts':ts,'comp':qs},'score':sv_score(ts,SV),'opt_score':o_score}}}
-                pickle.dump(D,f)
-                print(True)
+                        #----------------------------------------------------------------------------------------------------------------------------
+                        C = merge_calls(V['five']['L,R'],r=0.5)
+                        P = []
+                        for k in C:
+                            for vc in C[k]: P += [vc]
+                        P = sorted(P,key=lambda x: (x[0].zfill(255),x[1]))
+                        #-------------------------------------------------------------------------------------------------------
+                        alpha = accum_error
+                        PS = []
+                        S  = [vc for vc in P]
+                        S  = sorted(S,key=lambda x: x[5])[::-1]
+                        x  = 0.0
+                        for i in range(len(S)):
+                            x += 1.0-S[i][5]
+                            if x>=alpha: break
+                        if len(S)>0: S = S[:i+1]
+                        S = sorted(S,key=lambda x: (x[0].zfill(255),x[1]))
+                        write_vcf(S,five_models,ref,sm,out_dir)
+                    f.close()
+    if join_vcfs: #read one header and then merge and sort all the types
+        merge_vcfs(out_dir,sm)
+    total_end = time.time()
+    tts = total_end-total_start
+    print('total prediction time was %s:%s:%s'%(tts//(60*60),tts//60,tts%60))
