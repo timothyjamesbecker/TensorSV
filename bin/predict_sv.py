@@ -1105,30 +1105,6 @@ def merge_vcfs(out_dir,sm,over=0.75,size_filt=[50,int(1E5)],alpha={'DEL':10.0,'I
     print('')
     return data
 
-def calibrate_alpha(in_dir,over,size_filt,alpha_ranges={'DEL':[0.01,10.0],'DUP':[0.01,10.0],'INV':[0.01,10.0]}):
-    return True
-
-#-----------------------------------------------------------------------------------------------------------------------
-cal_dir = '/media/data/g1kp3hc_predict_S51/'
-in_dir = '/media/data/tcrboa_predict_S51/'
-over = 0.5
-size_filt = [0,1000000]
-alpha = {'DEL':100.0,'DUP':100.0,'INV':100.0}
-data = merge_vcfs(cal_dir,'HG00096',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG00419',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG01565',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG01583',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG01595',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG01879',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'HG03742',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(cal_dir,'NA12878',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-
-data = merge_vcfs(in_dir,'TCRBOA6_N',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(in_dir,'TCRBOA6_T',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(in_dir,'TCRBOA7_N',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-data = merge_vcfs(in_dir,'TCRBOA7_T',over=over,size_filt=size_filt,alpha=alpha,merge_types=True,write=True,verbose=False)
-#------------------------------------------------------------------------------------------------------------------------
-
 if __name__ == '__main__':
     des = """predict_sv: TensorSV Prediction Framework v0.1.2\nCopyright (C) 2020-2021 Timothy James Becker\n"""
     parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
