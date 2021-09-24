@@ -1494,7 +1494,7 @@ if __name__ == '__main__':
         print('located target files for all vcf samples')
     if len(sms)>0 and all([os.path.exists(target_path+'/%s.pickle.gz'%sm) for sm in sms]):
         print('located target files for all hfm/vcf samples')
-    if len(hfm_sms)>0 and not all([os.path.exists(target_path+'/%s.pickle.gz'%sm) for sm in hfm_sms]): #just predict
+    if len(hfm_sms)>0 and len(vcf_files)<=0 and not all([os.path.exists(target_path+'/%s.pickle.gz'%sm) for sm in hfm_sms]): #just predict
         print('located hfm files but not targets, assuming prediction only...')
     else:
         print('preparing target files from maxima, ref and vcf input files...')

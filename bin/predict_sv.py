@@ -33,10 +33,8 @@ if gpus:
 import core
 
 def w_harm_mean(p_x):
-    p = 0.0
-    for i in range(len(p_x)):
-        if p_x[i]>0.0: p += 1.0/p_x[i]
-    if p>0.0: p = (1.0*len(p_x))/p
+    n_p,n_d = np.product(p_x),np.sum(p_x)
+    if n_d>0.0: p = 1.0*len(p_x)*(n_p/n_d)
     return p
 
 #p[0]=ordinal class, p[1]=prob
@@ -436,15 +434,17 @@ def cluster_knn_pairs(B,pred,mask,k=3,order=None,trim=0.5,min_p=0.9,use_peak=Fal
     return AB
 
 #cord sorted cluster calls
-def cluster_calls(C,seq,pred,classes,m_map={'L':0,'R':1},hs={1:0.5,2:1.0},w=25,n=11):
+def cluster_calls(C,seq,pred,model,m_map={'L':0,'R':1},hs={1:0.5,2:1.0},w=25):
+    classes = int(model['L'].output.shape[1])
     V,x = [],0
+    l_n,r_n = int(model['L'].input.shape[1])//2,int(model['R'].input.shape[1])//2
     for c in C[(m_map['L'],m_map['R'])]:
         for i in range(len(C[(m_map['L'],m_map['R'])][c])):
             vc = C[(m_map['L'],m_map['R'])][c][i]
             r1 = vc[0][0]+np.argmax(pred[vc[0][0]:vc[0][1]+1,m_map[vc[0][2]]*classes+c])
             r2 = vc[1][0]+np.argmax(pred[vc[1][0]:vc[1][1]+1,m_map[vc[1][2]]*classes+c])
             x += 1
-            V += [[seq,r1*w+n*w,r2*w+n*w,(r2*w-r1*w+1*w),hs[vc[2]],w_harm_mean(vc[3]),2-vc[2],'idx_%s'%x]]
+            V += [[seq,r1*w+l_n*w,r2*w+r_n*w,(r2*w-r1*w+1*w),hs[vc[2]],w_harm_mean(vc[3]),2-vc[2],'idx_%s'%x]]
     V = sorted(V,key=lambda x: x[1])
     return V
 
@@ -588,7 +588,7 @@ def model_scanner(tensor_in,sm,rg,seq,mask,models,order=None,hs={1:0.5,2:1.0},k=
     start = time.time() #scan the likelihood estimates for L and R breakpoint ranges
     B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
     C = cluster_knn_pairs(B,pred,mask,k=1,order=order,trim=0.1,min_p=0.95,verbose=verbose)
-    K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,min_mean_p=0.95)
+    K = cluster_calls(C,seq,pred,model=M,m_map=order,hs=hs,min_mean_p=0.95)
     print(sv_score(T[seq],K))
     stop = time.time() #::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
     print('model scanning and clustering completed in %s sec'%round(stop-start,2))
@@ -1237,6 +1237,7 @@ if __name__ == '__main__':
                                             else:         T[d[0]]  = [d]
                                 for k in T: T[k] = sorted(T[k],key=lambda x: (x[0].zfill(255),x[1]))
                             else:
+                                s_sv = sv.split(':')[0]
                                 for s_sv in D:
                                     if s_sv.find(sv)>-1:
                                         for d in D[s_sv]:
@@ -1260,10 +1261,10 @@ if __name__ == '__main__':
                                         else:         Q[d[0]]  = [d]
                                 for k in Q: Q[k] = sorted(Q[k],key=lambda x: (x[0].zfill(255),x[1]))
                             elif sv.rsplit(':')[0] in D:
-                                sv = sv.rsplit(':')[0]
+                                comp_sv = sv.rsplit(':')[0]
                                 Q = {}
-                                for a_id in D[sv]:
-                                    d = D[sv][a_id][sm]
+                                for a_id in D[comp_sv]:
+                                    d = D[comp_sv][a_id][sm]
                                     if sv=='INS': d[1],d[2],d[3] = d[1]-500,d[2]+500,abs(d[2]-d[1]+1000)
                                     if d[3]>=0:
                                         if d[0] in Q: Q[d[0]] += [d]
@@ -1331,7 +1332,7 @@ if __name__ == '__main__':
                                 if sv=='DEL':   flank,max_w,k_c = 1.0,100,5
                                 elif sv=='DUP': flank,max_w,k_c = 2.0,200,3
                                 elif sv=='INV': flank,max_w,k_c = 0.5,100,3
-                                else:           flank,max_w,k_c = 0.5,100,3
+                                else:           flank,max_w,k_c = 0.5,1000,5
                                 min_p = 0.5
                                 B = scan_breaks(pred,m_labels=list(M.keys()),classes=classes)
                                 C = cluster_knn_pairs(B,pred,sv_mask,k=k_c,order=order,trim=min_p,min_p=base_score,verbose=False)
@@ -1345,10 +1346,10 @@ if __name__ == '__main__':
                                     if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
                                         K,KS = [],[]
                                     else:
-                                        K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                        K = cluster_calls(C,seq,pred,model=M,m_map=order,hs=hs,w=bw)
                                         KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
                                 else:
-                                    K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                    K = cluster_calls(C,seq,pred,model=M,m_map=order,hs=hs,w=bw)
                                     KS = sorted(K,key=lambda x: x[5])[::-1][0:int(0.5+min(5.0*len(T[seq]),len(K)))]
                                 if sv=='INS':
                                     for i in range(len(KS)):
@@ -1494,10 +1495,10 @@ if __name__ == '__main__':
                                     if not all([len(C[sorted(C)[0]][brk])>0 for brk in C[sorted(C)[0]]]):
                                         K,KS = [],[]
                                     else:
-                                        K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                        K = cluster_calls(C,seq,pred,model=M,m_map=order,hs=hs,w=bw)
                                         KS = sorted(K,key=lambda x: x[5])[::-1]
                                 else:
-                                    K = cluster_calls(C,seq,pred,classes=classes,m_map=order,hs=hs,w=bw,n=11)
+                                    K = cluster_calls(C,seq,pred,model=M,m_map=order,hs=hs,w=bw)
                                     KS = sorted(K,key=lambda x: x[5])[::-1]
                                 if sv=='INS':
                                     for i in range(len(KS)):
