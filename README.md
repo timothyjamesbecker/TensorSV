@@ -1,4 +1,3 @@
-[![Build Status](https://api.travis-ci.org/timothyjamesbecker/tensorsv.svg)](https://travis-ci.com/timothyjamesbecker/tensorsv) 
 ![GitHub All Releases](https://img.shields.io/github/downloads/timothyjamesbecker/TensorSV/total.svg) 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)<br>
 ![Alt text](images/tensorsv_logo.png?raw=true "not_tensor") <br>
